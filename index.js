@@ -5,82 +5,124 @@ const play = require('play-dl');
 const yts = require('yt-search');
 const express = require('express');
 
-// 1. Configuración inicial
+// 1. Configuración inicial con mejores timeouts
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages
   ],
-  rest: { timeout: 30_000 } // Aumenta timeout a 30 segundos
+  rest: { 
+    timeout: 30_000,
+    globalRateLimit: 50 // Limita solicitudes globales
+  }
 });
 
-// 2. Estructuras de datos
+// 2. Estructuras de datos con cooldowns
 const queues = new Map();
 const players = new Map();
 const connections = new Map();
+const cooldowns = new Map();
 
-// 3. Configuración mejorada de play-dl con manejo de rate limits
+// 3. Configuración optimizada de play-dl
 play.setToken({
   youtube: {
     cookie: process.env.YOUTUBE_COOKIE || '',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
   },
-  retry: 5,
-  delay: 3000
+  retry: 3,
+  delay: 5000,
+  timeout: 30000
 });
 
-// 4. Servidor web para keep-alive
+// 4. Servidor web mejorado
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.status(200).json({ status: 'active', timestamp: Date.now() }));
-app.listen(process.env.PORT || 3000, () => console.log('🟢 Keep-alive activo'));
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy',
+    guilds: client.guilds.cache.size,
+    uptime: process.uptime() 
+  });
+});
+app.listen(process.env.PORT || 3000, () => console.log('🟢 Keep-alive optimizado'));
 
-// 5. Eventos del cliente
+// 5. Eventos del cliente con heartbeat mejorado
 client.once('ready', () => {
-  console.log(`✅ ${client.user.tag} listo!`);
-  client.user.setActivity('/play | Música', { type: 'LISTENING' });
+  console.log(`✅ ${client.user.tag} listo en ${client.guilds.cache.size} servidores!`);
+  client.user.setActivity('/play | Música sin lag', { type: 'LISTENING' });
   
-  // Heartbeat para mantener conexión
-  setInterval(() => client.ws.ping, 30_000);
+  setInterval(() => {
+    client.ws.ping;
+    console.log('🫀 Heartbeat enviado');
+  }, 30000);
 });
 
-// 6. Manejo de interacciones (actualizado para usar MessageFlags)
+// 6. Manejo de interacciones con cooldown
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
+  // Sistema de cooldown
+  if (!cooldowns.has(interaction.commandName)) {
+    cooldowns.set(interaction.commandName, new Map());
+  }
+
+  const now = Date.now();
+  const timestamps = cooldowns.get(interaction.commandName);
+  const cooldownAmount = 3000; // 3 segundos de cooldown
+
+  if (timestamps.has(interaction.user.id)) {
+    const expirationTime = timestamps.get(interaction.user.id) + cooldownAmount;
+    if (now < expirationTime) {
+      const timeLeft = (expirationTime - now) / 1000;
+      return interaction.reply({
+        content: `⏳ Espera ${timeLeft.toFixed(1)} segundos antes de usar \`/${interaction.commandName}\` de nuevo.`,
+        flags: MessageFlags.Ephemeral
+      });
+    }
+  }
+
+  timestamps.set(interaction.user.id, now);
+  setTimeout(() => timestamps.delete(interaction.user.id), cooldownAmount);
+
   try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    
     if (interaction.commandName === 'play') {
       await handlePlayCommand(interaction);
     }
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error en interacción:`, error);
-    if (!interaction.deferred && !interaction.replied) {
-      await interaction.reply({ 
-        content: '❌ Error al procesar el comando', 
-        flags: MessageFlags.Ephemeral 
-      }).catch(console.error);
-    }
+    console.error(`[${new Date().toISOString()}] Error en ${interaction.commandName}:`, error);
+    await interaction.editReply({
+      content: '❌ Error interno. Por favor, intenta nuevamente.',
+      flags: MessageFlags.Ephemeral
+    }).catch(console.error);
   }
 });
 
-// 7. Función para manejar /play (actualizada)
+// 7. Función para manejar /play con mejoras
 async function handlePlayCommand(interaction) {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(console.error);
-
   const query = interaction.options.getString('query');
   const voiceChannel = interaction.member?.voice?.channel;
 
   if (!voiceChannel) {
     return interaction.editReply({ 
-      content: '🔇 Debes unirte a un canal de voz primero',
+      content: '🔇 Debes estar en un canal de voz primero.',
       flags: MessageFlags.Ephemeral 
-    }).catch(console.error);
+    });
   }
 
   try {
+    // Delay para evitar rate limits
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
     const song = await getSongInfo(query);
-    if (!song) return;
+    if (!song) {
+      return interaction.editReply({
+        content: '❌ No se encontró la canción.',
+        flags: MessageFlags.Ephemeral
+      });
+    }
 
     if (!queues.has(interaction.guild.id)) {
       queues.set(interaction.guild.id, []);
@@ -91,48 +133,50 @@ async function handlePlayCommand(interaction) {
       .setColor('#0099ff')
       .setTitle('🎵 Añadido a la cola')
       .setDescription(`[${song.title}](${song.url})`)
-      .setFooter({ text: `Duración: ${song.duration}` });
+      .setFooter({ text: `Duración: ${song.duration} | Posición en cola: ${queues.get(interaction.guild.id).length}` });
 
-    await interaction.editReply({ embeds: [embed] }).catch(console.error);
+    await interaction.editReply({ embeds: [embed] });
 
     if (!players.has(interaction.guild.id)) {
       await playMusic(interaction.guild.id, voiceChannel);
     }
   } catch (error) {
     console.error(`[${new Date().toISOString()}] Error en /play:`, error);
-    await interaction.editReply({ 
-      content: '❌ Error: ' + (error.message || 'Intenta nuevamente'),
-      flags: MessageFlags.Ephemeral 
-    }).catch(console.error);
+    await interaction.editReply({
+      content: '⚠️ YouTube está limitando las solicitudes. Intenta nuevamente en 30 segundos.',
+      flags: MessageFlags.Ephemeral
+    });
   }
 }
 
-// 8. Obtener información de canción con delay
+// 8. Función optimizada para obtener info de canciones
 async function getSongInfo(query) {
-  await new Promise(resolve => setTimeout(resolve, 1000)); // Delay para evitar rate limits
-  
-  const isUrl = play.yt_validate(query);
-  
-  if (isUrl) {
-    const info = await play.video_info(query);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 2000)); // Delay adicional
+    
+    const isUrl = play.yt_validate(query);
+    let info;
+
+    if (isUrl) {
+      info = await play.video_info(query);
+    } else {
+      const { videos } = await yts(query);
+      if (!videos.length) return null;
+      info = await play.video_info(videos[0].url);
+    }
+
     return {
       title: info.video_details.title,
       url: info.video_details.url,
-      duration: info.video_details.durationRaw
+      duration: info.video_details.durationRaw || 'N/A'
     };
-  } else {
-    const { videos } = await yts(query);
-    if (!videos.length) return null;
-    const info = await play.video_info(videos[0].url);
-    return {
-      title: info.video_details.title,
-      url: info.video_details.url,
-      duration: info.video_details.durationRaw
-    };
+  } catch (error) {
+    console.error('Error en getSongInfo:', error);
+    return null;
   }
 }
 
-// 9. Función principal de reproducción
+// 9. Función principal de reproducción con manejo mejorado
 async function playMusic(guildId, voiceChannel) {
   try {
     const connection = joinVoiceChannel({
@@ -148,15 +192,15 @@ async function playMusic(guildId, voiceChannel) {
 
     player.on(AudioPlayerStatus.Idle, () => handleIdlePlayer(guildId));
     player.on('error', error => {
-      console.error(`[${new Date().toISOString()}] Error en player:`, error);
+      console.error('Error en player:', error);
       cleanup(guildId);
     });
 
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
-          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(connection, VoiceConnectionStatus.Connecting, 5_000)
+          entersState(connection, VoiceConnectionStatus.Signalling, 5000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5000)
         ]);
       } catch (error) {
         cleanup(guildId);
@@ -165,24 +209,24 @@ async function playMusic(guildId, voiceChannel) {
 
     await playNextTrack(guildId, player);
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error en playMusic:`, error);
+    console.error('Error en playMusic:', error);
     cleanup(guildId);
   }
 }
 
-// 10. Reproducir siguiente canción con mejor manejo de rate limits
+// 10. Función optimizada para playNextTrack
 async function playNextTrack(guildId, player) {
-  try {
-    const queue = queues.get(guildId);
-    if (!queue?.length) return cleanup(guildId);
+  const queue = queues.get(guildId);
+  if (!queue?.length) return cleanup(guildId);
 
-    // Delay aleatorio entre 1-3 segundos
-    await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
+  try {
+    // Delay aleatorio entre 3-6 segundos
+    await new Promise(resolve => setTimeout(resolve, Math.random() * 3000 + 3000));
 
     const stream = await play.stream(queue[0].url, {
       quality: 'lowestaudio',
       discordPlayerCompatibility: true,
-      retry: 3
+      retry: 2
     });
 
     const resource = createAudioResource(stream.stream, {
@@ -192,21 +236,22 @@ async function playNextTrack(guildId, player) {
 
     player.play(resource);
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error en playNextTrack:`, error);
+    console.error('Error en playNextTrack:', error);
     if (error.message.includes('429')) {
-      await new Promise(resolve => setTimeout(resolve, 30_000));
+      await new Promise(resolve => setTimeout(resolve, 30000));
       return playNextTrack(guildId, player);
     }
     handleIdlePlayer(guildId);
   }
 }
 
-// 11. Manejar reproductor inactivo
+// 11. Función para manejar idle player
 async function handleIdlePlayer(guildId) {
   const queue = queues.get(guildId);
   if (queue?.length) {
     queue.shift();
     if (queue.length > 0) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
       await playNextTrack(guildId, players.get(guildId));
       return;
     }
@@ -216,16 +261,26 @@ async function handleIdlePlayer(guildId) {
     if (players.get(guildId)?.state.status === AudioPlayerStatus.Idle) {
       cleanup(guildId);
     }
-  }, 300_000);
+  }, 180000); // Desconectar después de 3 minutos inactivo
 }
 
-// 12. Limpieza de recursos
+// 12. Función de limpieza optimizada
 function cleanup(guildId) {
   try {
-    connections.get(guildId)?.destroy();
-    players.get(guildId)?.stop();
+    const connection = connections.get(guildId);
+    const player = players.get(guildId);
+    
+    if (connection) {
+      connection.destroy();
+      console.log(`🔌 Desconectado del servidor ${guildId}`);
+    }
+    
+    if (player) {
+      player.stop();
+      console.log(`⏹ Reproductor detenido en ${guildId}`);
+    }
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error en cleanup:`, error);
+    console.error('Error en cleanup:', error);
   } finally {
     connections.delete(guildId);
     players.delete(guildId);
@@ -243,8 +298,8 @@ process.on('uncaughtException', error => {
   process.exit(1);
 });
 
-// 14. Iniciar bot
+// 14. Inicio seguro del bot
 client.login(process.env.DISCORD_TOKEN).catch(error => {
-  console.error(`[${new Date().toISOString()}] Error al iniciar sesión:`, error);
+  console.error('Error al iniciar sesión:', error);
   process.exit(1);
 });
