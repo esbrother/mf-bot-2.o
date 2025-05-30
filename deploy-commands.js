@@ -23,7 +23,9 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
     console.log('Registrando comandos...');
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log('✅ Comandos registrados!');
+    process.exit(0); // Asegura que el proceso termine después de ejecutar
   } catch (error) {
     console.error('❌ Error:', error);
+    process.exit(1); // Termina con código de error
   }
 })();
