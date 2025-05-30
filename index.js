@@ -3,7 +3,7 @@ process.env.FFMPEG_PATH = FFmpeg;
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, entersState, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const yts = require('yt-search');
-const play = require('play-dl');
+const ytdl = require('ytdl-core');
 const express = require('express');
 const app = express();
 const port = 1995;
@@ -60,13 +60,13 @@ async function playMusic(guildId, voiceChannel, song) {
     audioPlayers.set(guildId, player);
     connection.subscribe(player);
 
-    const stream = await play.stream(song.url, {
-      discordPlayerCompatibility: true,
-      quality: 2
+    const stream = ytdl(song.url, {
+      filter: 'audioonly',
+      quality: 'highestaudio',
+      highWaterMark: 1 << 25
     });
     
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
+    const resource = createAudioResource(stream, {
       inlineVolume: true
     });
 
@@ -155,13 +155,13 @@ client.on('interactionCreate', async interaction => {
     // Manejo de enlaces directos
     if (isUrl) {
       try {
-        if (!query.includes('youtube.com') && !query.includes('youtu.be')) {
-          return interaction.editReply('❌ Solo se aceptan enlaces de YouTube');
+        if (!ytdl.validateURL(query)) {
+          return interaction.editReply('❌ Enlace de YouTube no válido');
         }
 
-        const songInfo = await play.video_info(query);
+        const info = await ytdl.getInfo(query);
         const song = {
-          title: songInfo.video_details?.title || 'Canción de YouTube',
+          title: info.videoDetails.title || 'Canción de YouTube',
           url: query,
           platform: 'youtube'
         };
