@@ -1,13 +1,12 @@
 const { FFmpeg } = require('ffmpeg-static');
 process.env.FFMPEG_PATH = FFmpeg;
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, entersState, StreamType, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, entersState, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const yts = require('yt-search');
 const play = require('play-dl');
 const express = require('express');
 const app = express();
 const port = 1995;
-const { OpusEncoder } = require('@discordjs/opus');
 
 const client = new Client({
   intents: [
@@ -30,19 +29,10 @@ app.listen(port, () => console.log(`Servidor en puerto ${port}`));
 // Eventos del bot
 client.once('ready', () => {
   console.log(`✅ ${client.user.tag} listo!`);
-  client.user.setActivity('/play | MúsicaBot', { type: 'LISTENING' });
+  client.user.setActivity('/play | YouTube Music', { type: 'LISTENING' });
 });
 
 // Funciones auxiliares
-function getPlatformIcon(platform) {
-  const icons = {
-    youtube: '🔴',
-    spotify: '🟢',
-    default: '🎵'
-  };
-  return icons[platform.toLowerCase()] || icons.default;
-}
-
 async function searchYouTube(query) {
   try {
     const { videos } = await yts(query);
@@ -55,7 +45,6 @@ async function searchYouTube(query) {
 
 async function playMusic(guildId, voiceChannel, song) {
   try {
-    // Verificar si ya hay una conexión activa
     let connection = connections.get(guildId);
     
     if (!connection || connection.state.status === VoiceConnectionStatus.Disconnected) {
@@ -71,19 +60,15 @@ async function playMusic(guildId, voiceChannel, song) {
     audioPlayers.set(guildId, player);
     connection.subscribe(player);
 
-    let resource;
-    if (song.url.includes('youtube.com') || song.url.includes('youtu.be')) {
-      const stream = await play.stream(song.url, {
-        discordPlayerCompatibility: true,
-        quality: 2
-      });
-      resource = createAudioResource(stream.stream, {
-        inputType: stream.type,
-        inlineVolume: true
-      });
-    } else {
-      throw new Error('URL no soportada');
-    }
+    const stream = await play.stream(song.url, {
+      discordPlayerCompatibility: true,
+      quality: 2
+    });
+    
+    const resource = createAudioResource(stream.stream, {
+      inputType: stream.type,
+      inlineVolume: true
+    });
 
     player.play(resource);
 
@@ -99,12 +84,12 @@ async function playMusic(guildId, voiceChannel, song) {
             audioPlayers.delete(guildId);
             queues.delete(guildId);
           }
-        }, 300000); // 5 minutos de inactividad antes de desconectar
+        }, 300000);
       }
     });
 
     player.on('error', error => {
-      console.error('🔴 Error en el reproductor:', error);
+      console.error('Error en el reproductor:', error);
       const queue = queues.get(guildId);
       if (queue?.length > 0) {
         playMusic(guildId, voiceChannel, queue.shift());
@@ -131,7 +116,7 @@ async function playMusic(guildId, voiceChannel, song) {
     });
 
   } catch (error) {
-    console.error('🔴 Error al reproducir:', error);
+    console.error('Error al reproducir:', error);
     const connection = connections.get(guildId);
     if (connection) {
       connection.destroy();
@@ -150,12 +135,12 @@ client.on('interactionCreate', async interaction => {
     const query = interaction.options.getString('query');
 
     if (!query) {
-      return interaction.editReply('Usa: /play <nombre o enlace>');
+      return interaction.editReply('Usa: /play <nombre o enlace de YouTube>');
     }
 
     const voiceChannel = interaction.member.voice.channel;
     if (!voiceChannel) {
-      return interaction.editReply('Entra a un canal de voz primero!');
+      return interaction.editReply('¡Entra a un canal de voz primero!');
     }
 
     // Verificar si es una URL válida
@@ -169,24 +154,16 @@ client.on('interactionCreate', async interaction => {
 
     // Manejo de enlaces directos
     if (isUrl) {
-      let songInfo;
       try {
-        // Validar URL con play-dl
-        const info = await play.validate(query);
-        if (!info) {
-          return interaction.editReply('❌ Enlace no soportado. Solo YouTube/Spotify.');
+        if (!query.includes('youtube.com') && !query.includes('youtu.be')) {
+          return interaction.editReply('❌ Solo se aceptan enlaces de YouTube');
         }
 
-        if (query.includes('youtu')) {
-          songInfo = await play.video_info(query);
-        } else if (query.includes('spotify')) {
-          songInfo = { title: 'Canción de Spotify' };
-        }
-
+        const songInfo = await play.video_info(query);
         const song = {
-          title: songInfo.video_details?.title || 'Canción desde enlace',
+          title: songInfo.video_details?.title || 'Canción de YouTube',
           url: query,
-          platform: query.includes('youtu') ? 'youtube' : 'spotify'
+          platform: 'youtube'
         };
 
         if (!queues.has(interaction.guild.id)) {
@@ -203,27 +180,27 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setColor('#0099ff')
+              .setColor('#FF0000')
               .setTitle('🎵 Añadido a la cola')
               .setDescription(`[${song.title}](${query})`)
-              .setFooter({ text: `Plataforma: ${song.platform.toUpperCase()} ${getPlatformIcon(song.platform)}` })
+              .setFooter({ text: 'Plataforma: YOUTUBE 🔴' })
           ]
         });
       } catch (error) {
         console.error('Error al procesar enlace:', error);
-        return interaction.editReply('❌ Error al procesar el enlace. ¿Es válido?');
+        return interaction.editReply('❌ Error al procesar el enlace de YouTube');
       }
     }
 
     // Búsqueda por texto
     const results = await searchYouTube(query);
     if (results.length === 0) {
-      return interaction.editReply('No encontré resultados 😢');
+      return interaction.editReply('No encontré resultados en YouTube 😢');
     }
 
     const embed = new EmbedBuilder()
-      .setColor('#0099ff')
-      .setTitle(`🔍 Resultados para "${query}"`)
+      .setColor('#FF0000')
+      .setTitle(`🔍 Resultados de YouTube para "${query}"`)
       .setDescription('Elige una canción:');
 
     results.forEach((result, index) => {
@@ -272,7 +249,7 @@ client.on('interactionCreate', async interaction => {
       await i.update({
         embeds: [
           new EmbedBuilder()
-            .setColor('#00ff00')
+            .setColor('#00FF00')
             .setTitle('✅ Añadido a la cola')
             .setDescription(`[${selected.title}](${selected.url})`)
         ],
