@@ -93,7 +93,7 @@ async function handlePlayCommand(interaction) {
   try {
     let song;
 
-    if (play.yt_validate(query) {
+ if (play.yt_validate(query)) {
       const info = await play.video_info(query);
       song = {
         title: info.video_details.title,
