@@ -1,15 +1,42 @@
-// Polyfill para ReadableStream
-if (typeof ReadableStream === 'undefined') {
-  global.ReadableStream = require('stream/web').ReadableStream;
-}
-require('dotenv').config(); // Asegúrate de tener el paquete dotenv instalado
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+require('dotenv').config();
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState } = require('@discordjs/voice');
 const play = require('play-dl');
 const yts = require('yt-search');
 const express = require('express');
 
-// Configuración inicial
+// Configuración avanzada de play-dl
+play.setToken({
+  youtube: {
+    cookie: process.env.YOUTUBE_COOKIE || '',
+    userAgent: [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'AppleWebKit/537.36 (KHTML, like Gecko)',
+      'Chrome/114.0.0.0 Safari/537.36'
+    ].join(' ')
+  }
+});
+
+// Control de tasa de solicitudes
+const requestDelay = process.env.REQUEST_DELAY_MS ? parseInt(process.env.REQUEST_DELAY_MS) : 2000;
+let lastRequest = Date.now();
+
+async function safeRequest(url) {
+  const now = Date.now();
+  const elapsed = now - lastRequest;
+  
+  if (elapsed < requestDelay) {
+    await new Promise(resolve => setTimeout(resolve, requestDelay - elapsed));
+  }
+  
+  lastRequest = Date.now();
+  return play.stream(url, {
+    quality: 'lowestaudio',
+    discordPlayerCompatibility: true,
+    retry: 3
+  });
+}
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -21,33 +48,24 @@ const client = new Client({
 
 // Estructuras de datos
 const queues = new Map();
-const audioPlayers = new Map();
-const voiceConnections = new Map();
-
-// Configuración de play-dl
-play.setToken({
-  youtube: {
-    cookie: process.env.YOUTUBE_COOKIE || ''
-  }
-});
+const players = new Map();
+const connections = new Map();
 
 // Servidor web para keep-alive
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.status(200).json({ status: 'ok' }));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🟢 Keep-alive en puerto ${PORT}`));
+app.get('/', (req, res) => res.status(200).json({ status: 'active', timestamp: Date.now() }));
+app.listen(process.env.PORT || 3000, () => console.log('🟢 Keep-alive activo'));
 
 // Eventos del cliente
 client.once('ready', () => {
   console.log(`✅ Bot conectado como ${client.user.tag}`);
   client.user.setActivity('/play | Música', { type: 'LISTENING' });
-
-  // Heartbeat para mantener la conexión
+  
+  // Heartbeat
   setInterval(() => client.ws.ping, 30000);
 });
 
-// Manejo de comandos
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -57,11 +75,11 @@ client.on('interactionCreate', async interaction => {
     }
   } catch (error) {
     console.error('Error en interacción:', error);
-    await interaction.reply({ content: '❌ Ocurrió un error al procesar el comando', ephemeral: true }).catch(console.error);
+    await interaction.reply({ content: '❌ Error al procesar el comando', ephemeral: true }).catch(console.error);
   }
 });
 
-// Función para manejar el comando /play
+// Manejo del comando /play
 async function handlePlayCommand(interaction) {
   await interaction.deferReply();
 
@@ -75,8 +93,7 @@ async function handlePlayCommand(interaction) {
   try {
     let song;
 
-    // Validar si es URL o búsqueda
-    if (play.yt_validate(query) === 'video') {
+    if (play.yt_validate(query) {
       const info = await play.video_info(query);
       song = {
         title: info.video_details.title,
@@ -85,9 +102,7 @@ async function handlePlayCommand(interaction) {
       };
     } else {
       const { videos } = await yts(query);
-      if (!videos.length) {
-        return interaction.editReply('🔍 No se encontraron resultados');
-      }
+      if (!videos.length) return interaction.editReply('🔍 No se encontraron resultados');
       const info = await play.video_info(videos[0].url);
       song = {
         title: info.video_details.title,
@@ -100,9 +115,7 @@ async function handlePlayCommand(interaction) {
     if (!queues.has(interaction.guild.id)) {
       queues.set(interaction.guild.id, []);
     }
-
-    const queue = queues.get(interaction.guild.id);
-    queue.push(song);
+    queues.get(interaction.guild.id).push(song);
 
     // Respuesta al usuario
     const embed = new EmbedBuilder()
@@ -113,44 +126,44 @@ async function handlePlayCommand(interaction) {
 
     await interaction.editReply({ embeds: [embed] });
 
-    // Reproducir si no hay nada sonando
-    if (!audioPlayers.has(interaction.guild.id)) {
+    // Iniciar reproducción si no hay nada sonando
+    if (!players.has(interaction.guild.id)) {
       await playMusic(interaction.guild.id, voiceChannel);
     }
   } catch (error) {
     console.error('Error en handlePlayCommand:', error);
-    await interaction.editReply('❌ Error al procesar la solicitud').catch(console.error);
+    if (error.message.includes('429')) {
+      await interaction.editReply('⚠️ YouTube está limitando las solicitudes. Intenta de nuevo en unos segundos');
+    } else {
+      await interaction.editReply('❌ Error al procesar la solicitud');
+    }
   }
 }
 
 // Función principal de reproducción
 async function playMusic(guildId, voiceChannel) {
   try {
-    // Crear conexión de voz
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: voiceChannel.guild.id,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     });
 
-    voiceConnections.set(guildId, connection);
-
-    // Crear reproductor de audio
     const player = createAudioPlayer();
-    audioPlayers.set(guildId, player);
+    players.set(guildId, player);
+    connections.set(guildId, connection);
     connection.subscribe(player);
 
-    // Manejar eventos del reproductor
+    // Manejadores de eventos
     player.on('error', error => {
       console.error('Error en el reproductor:', error);
       cleanup(guildId);
     });
 
     player.on(AudioPlayerStatus.Idle, () => {
-      handleIdlePlayer(guildId, voiceChannel);
+      handleIdlePlayer(guildId);
     });
 
-    // Manejar eventos de conexión
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
@@ -171,40 +184,32 @@ async function playMusic(guildId, voiceChannel) {
   }
 }
 
-// Función para manejar el estado Idle
-async function handleIdlePlayer(guildId, voiceChannel) {
+// Manejo de estado Idle
+async function handleIdlePlayer(guildId) {
   const queue = queues.get(guildId);
   if (queue?.length) {
     queue.shift();
     if (queue.length > 0) {
-      await playNextTrack(guildId, audioPlayers.get(guildId));
+      await playNextTrack(guildId, players.get(guildId));
       return;
     }
   }
 
-  // Desconectar después de 5 minutos de inactividad
+  // Desconexión después de 5 minutos de inactividad
   setTimeout(() => {
-    if (audioPlayers.get(guildId)?.state?.status === AudioPlayerStatus.Idle) {
+    if (players.get(guildId)?.state?.status === AudioPlayerStatus.Idle) {
       cleanup(guildId);
     }
   }, 300_000);
 }
 
-// Función para reproducir la siguiente canción
+// Reproducir siguiente canción
 async function playNextTrack(guildId, player) {
   try {
     const queue = queues.get(guildId);
-    if (!queue?.length) {
-      cleanup(guildId);
-      return;
-    }
+    if (!queue?.length) return cleanup(guildId);
 
-    const song = queue[0];
-    const stream = await play.stream(song.url, {
-      quality: 2,
-      discordPlayerCompatibility: true
-    });
-
+    const stream = await safeRequest(queue[0].url);
     const resource = createAudioResource(stream.stream, {
       inputType: stream.type,
       inlineVolume: true
@@ -213,25 +218,30 @@ async function playNextTrack(guildId, player) {
     player.play(resource);
   } catch (error) {
     console.error('Error en playNextTrack:', error);
+    if (error.message.includes('429')) {
+      console.log('⚠️ Esperando 10 segundos por límite de YouTube...');
+      await new Promise(resolve => setTimeout(resolve, 10000));
+      return playNextTrack(guildId, player);
+    }
     handleIdlePlayer(guildId);
   }
 }
 
-// Función para limpieza
+// Limpieza de recursos
 function cleanup(guildId) {
   try {
-    voiceConnections.get(guildId)?.destroy();
-    audioPlayers.get(guildId)?.stop();
+    connections.get(guildId)?.destroy();
+    players.get(guildId)?.stop();
   } catch (error) {
     console.error('Error en cleanup:', error);
   } finally {
-    voiceConnections.delete(guildId);
-    audioPlayers.delete(guildId);
+    connections.delete(guildId);
+    players.delete(guildId);
     queues.delete(guildId);
   }
 }
 
-// Manejo de errores no capturados
+// Manejo de errores globales
 process.on('unhandledRejection', error => {
   console.error('Unhandled Rejection:', error);
 });
@@ -240,7 +250,7 @@ process.on('uncaughtException', error => {
   console.error('Uncaught Exception:', error);
 });
 
-// Iniciar el bot
+// Iniciar bot
 client.login(process.env.DISCORD_TOKEN).catch(error => {
   console.error('Error al iniciar sesión:', error);
   process.exit(1);
