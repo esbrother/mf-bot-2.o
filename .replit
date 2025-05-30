@@ -1,0 +1,18 @@
+language = "nodejs"
+run = "npm start"
+modules = ["nodejs-20"]
+
+[nix]
+channel = "stable-22_11"
+
+[env]
+DISCORD_TOKEN = "@DISCORD_TOKEN"
+CLIENT_ID = "@CLIENT_ID"
+
+[[ports]]
+localPort = 1995
+externalPort = 3000
+
+[[ports]]
+localPort = 3000
+externalPort = 80
