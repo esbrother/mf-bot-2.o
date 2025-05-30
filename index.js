@@ -20,12 +20,14 @@ const queues = new Map();
 const players = new Map();
 const connections = new Map();
 
-// 3. Configuración de play-dl
+// 3. Configuración mejorada de play-dl con manejo de rate limits
 play.setToken({
   youtube: {
     cookie: process.env.YOUTUBE_COOKIE || '',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
-  }
+  },
+  retry: 5,
+  delay: 3000
 });
 
 // 4. Servidor web para keep-alive
@@ -43,7 +45,7 @@ client.once('ready', () => {
   setInterval(() => client.ws.ping, 30_000);
 });
 
-// 6. Manejo de interacciones
+// 6. Manejo de interacciones (actualizado para usar MessageFlags)
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -52,7 +54,7 @@ client.on('interactionCreate', async interaction => {
       await handlePlayCommand(interaction);
     }
   } catch (error) {
-    console.error('Error en interacción:', error);
+    console.error(`[${new Date().toISOString()}] Error en interacción:`, error);
     if (!interaction.deferred && !interaction.replied) {
       await interaction.reply({ 
         content: '❌ Error al procesar el comando', 
@@ -62,10 +64,9 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// 7. Función para manejar /play
+// 7. Función para manejar /play (actualizada)
 async function handlePlayCommand(interaction) {
-  // Diferir respuesta inmediatamente
-  await interaction.deferReply({ ephemeral: false }).catch(console.error);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(console.error);
 
   const query = interaction.options.getString('query');
   const voiceChannel = interaction.member?.voice?.channel;
@@ -81,13 +82,11 @@ async function handlePlayCommand(interaction) {
     const song = await getSongInfo(query);
     if (!song) return;
 
-    // Manejo de cola
     if (!queues.has(interaction.guild.id)) {
       queues.set(interaction.guild.id, []);
     }
     queues.get(interaction.guild.id).push(song);
 
-    // Respuesta embed
     const embed = new EmbedBuilder()
       .setColor('#0099ff')
       .setTitle('🎵 Añadido a la cola')
@@ -96,12 +95,11 @@ async function handlePlayCommand(interaction) {
 
     await interaction.editReply({ embeds: [embed] }).catch(console.error);
 
-    // Iniciar reproducción si es necesario
     if (!players.has(interaction.guild.id)) {
       await playMusic(interaction.guild.id, voiceChannel);
     }
   } catch (error) {
-    console.error('Error en /play:', error);
+    console.error(`[${new Date().toISOString()}] Error en /play:`, error);
     await interaction.editReply({ 
       content: '❌ Error: ' + (error.message || 'Intenta nuevamente'),
       flags: MessageFlags.Ephemeral 
@@ -109,8 +107,10 @@ async function handlePlayCommand(interaction) {
   }
 }
 
-// 8. Obtener información de canción
+// 8. Obtener información de canción con delay
 async function getSongInfo(query) {
+  await new Promise(resolve => setTimeout(resolve, 1000)); // Delay para evitar rate limits
+  
   const isUrl = play.yt_validate(query);
   
   if (isUrl) {
@@ -146,10 +146,9 @@ async function playMusic(guildId, voiceChannel) {
     connections.set(guildId, connection);
     connection.subscribe(player);
 
-    // Manejadores de eventos
     player.on(AudioPlayerStatus.Idle, () => handleIdlePlayer(guildId));
     player.on('error', error => {
-      console.error('Error en player:', error);
+      console.error(`[${new Date().toISOString()}] Error en player:`, error);
       cleanup(guildId);
     });
 
@@ -166,16 +165,19 @@ async function playMusic(guildId, voiceChannel) {
 
     await playNextTrack(guildId, player);
   } catch (error) {
-    console.error('Error en playMusic:', error);
+    console.error(`[${new Date().toISOString()}] Error en playMusic:`, error);
     cleanup(guildId);
   }
 }
 
-// 10. Reproducir siguiente canción
+// 10. Reproducir siguiente canción con mejor manejo de rate limits
 async function playNextTrack(guildId, player) {
   try {
     const queue = queues.get(guildId);
     if (!queue?.length) return cleanup(guildId);
+
+    // Delay aleatorio entre 1-3 segundos
+    await new Promise(resolve => setTimeout(resolve, Math.random() * 2000 + 1000));
 
     const stream = await play.stream(queue[0].url, {
       quality: 'lowestaudio',
@@ -190,9 +192,9 @@ async function playNextTrack(guildId, player) {
 
     player.play(resource);
   } catch (error) {
-    console.error('Error en playNextTrack:', error);
+    console.error(`[${new Date().toISOString()}] Error en playNextTrack:`, error);
     if (error.message.includes('429')) {
-      await new Promise(resolve => setTimeout(resolve, 10_000));
+      await new Promise(resolve => setTimeout(resolve, 30_000));
       return playNextTrack(guildId, player);
     }
     handleIdlePlayer(guildId);
@@ -210,7 +212,6 @@ async function handleIdlePlayer(guildId) {
     }
   }
 
-  // Desconectar después de 5 minutos
   setTimeout(() => {
     if (players.get(guildId)?.state.status === AudioPlayerStatus.Idle) {
       cleanup(guildId);
@@ -224,7 +225,7 @@ function cleanup(guildId) {
     connections.get(guildId)?.destroy();
     players.get(guildId)?.stop();
   } catch (error) {
-    console.error('Error en cleanup:', error);
+    console.error(`[${new Date().toISOString()}] Error en cleanup:`, error);
   } finally {
     connections.delete(guildId);
     players.delete(guildId);
@@ -232,17 +233,18 @@ function cleanup(guildId) {
   }
 }
 
-// 13. Manejo de errores globales
+// 13. Manejo mejorado de errores globales
 process.on('unhandledRejection', error => {
-  console.error('Unhandled Rejection:', error);
+  console.error(`[${new Date().toISOString()}] Unhandled Rejection:`, error);
 });
 
 process.on('uncaughtException', error => {
-  console.error('Uncaught Exception:', error);
+  console.error(`[${new Date().toISOString()}] Uncaught Exception:`, error);
+  process.exit(1);
 });
 
 // 14. Iniciar bot
 client.login(process.env.DISCORD_TOKEN).catch(error => {
-  console.error('Error al iniciar sesión:', error);
+  console.error(`[${new Date().toISOString()}] Error al iniciar sesión:`, error);
   process.exit(1);
 });
